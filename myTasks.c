@@ -88,97 +88,88 @@ void Task_iButton(void *pvParameters) {
 // ========== 借剪线钳任务 ==========
 static void Task_Emprunt_Coupante(void *pvParameters) {
     uint32_t etat_capteurs;
-    uint32_t free_mask;
+    uint32_t tool_present_mask;
     int slot_choisi;
 
     while (1) {
-        // 1. 等待刷卡任务通知
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-        // 2. 读取所有微动开关状态
         etat_capteurs = Read_74HC251_Inputs();
 
-        // 3. 找出 0~15 号槽位中空闲的（微动开关未被压下，假设空闲时对应位为 0）
-        free_mask = 0;
+        // 寻找有工具的槽位（0代表微动开关被压下，即有工具） [cite: 87]
+        tool_present_mask = 0;
         for (int i = 0; i < 16; i++) {
             if (!(etat_capteurs & (1 << i))) {
-                free_mask |= (1 << i);
+                tool_present_mask |= (1 << i);
             }
         }
 
-        // 4. 点亮空闲槽位 LED（绿色），占用槽位熄灭
         if (xSemaphoreTake(pxLED_MUTEX, portMAX_DELAY) == pdPASS) {
             for (int i = 0; i < 16; i++) {
-                if (free_mask & (1 << i)) {
-                    LED[i][0] = 0;    // R
-                    LED[i][1] = 255;  // G
-                    LED[i][2] = 0;    // B
+                if (tool_present_mask & (1 << i)) {
+                    LED[i][0] = 0; LED[i][1] = 255; LED[i][2] = 0;
                 } else {
-                    LED[i][0] = 0;
-                    LED[i][1] = 0;
-                    LED[i][2] = 0;
+                    LED[i][0] = 0; LED[i][1] = 0; LED[i][2] = 0;
                 }
             }
             xSemaphoreGive(pxLED_MUTEX);
         }
 
-		// 5. 轮询等待按钮（10 秒超时），并处理闪烁
         int time_elapsed_ms = 0;
         slot_choisi = -1;
         int blink_counter = 0;
 
-        // 假设 def_type_gpio.h 里定义了宏，比如：
-        // #define BP_EMPRUNT_COUPE_PRESSED() ((GPIOB->IDR & (1<<0)) == 0)
-        
+        // 等待 10 秒超时或 BP_FIN 按下 [cite: 142, 145]
         while (time_elapsed_ms < 10000) {
-            // 如果用户按下了借出键，且还没分配槽位
             if (slot_choisi == -1 && BP_EMPRUNT_COUPE_PRESSED()) {
-                // 从 free_mask 里随便挑一个空闲的槽位 (比如找最低位的1)
                 for (int i = 0; i < 16; i++) {
-                    if (free_mask & (1 << i)) {
+                    if (tool_present_mask & (1 << i)) {
                         slot_choisi = i;
                         break;
                     }
                 }
-
                 if (slot_choisi != -1) {
-                    // 7. 开锁
                     taskENTER_CRITICAL();
-                    etat_verrous |= (1 << slot_choisi);
+                    etat_verrous |= (1 << slot_choisi); // 开锁 [cite: 144]
                     taskEXIT_CRITICAL();
-                    
-                    // 8. 更新数据库
-                    base_de_donnees[index_utilisateur_courant].id_pince_coupante = slot_choisi + 1;
-                    base_de_donnees[index_utilisateur_courant].tick_emprunt_coupante = xTaskGetTickCount();
                 }
             }
 
-            // 如果已经选好了槽位，就让那个绿灯 2Hz 闪烁 (每 250ms 翻转一次)
             if (slot_choisi != -1) {
                 blink_counter++;
-                if (blink_counter >= 5) { // 5 * 50ms = 250ms
+                if (blink_counter >= 5) {
                     blink_counter = 0;
                     if (xSemaphoreTake(pxLED_MUTEX, 0) == pdPASS) {
-                        // 异或操作：如果是 255 就变 0，如果是 0 就变 255
-                        LED[slot_choisi][1] ^= 255; 
+                        LED[slot_choisi][1] ^= 255; // 2Hz闪烁 [cite: 144]
                         xSemaphoreGive(pxLED_MUTEX);
                     }
                 }
             }
 
+            if (BP_FIN_PRESSED()) break; // 按下BP_fin提前结束 [cite: 148]
+
             vTaskDelay(pdMS_TO_TICKS(50));
             time_elapsed_ms += 50;
         }
 
-        // 9. 清理该区域所有 LED
-        if (xSemaphoreTake(pxLED_MUTEX, portMAX_DELAY) == pdPASS) {
-            for (int i = 0; i < 16; i++) {
-                LED[i][0] = 0; LED[i][1] = 0; LED[i][2] = 0;
+        // 10秒结束或按下完成键后，检查是否真的被拿走 [cite: 145, 146]
+        if (slot_choisi != -1) {
+            etat_capteurs = Read_74HC251_Inputs();
+            // 状态为 1 说明工具被拔出了 [cite: 87]
+            if (etat_capteurs & (1 << slot_choisi)) {
+                base_de_donnees[index_utilisateur_courant].id_pince_coupante = slot_choisi + 1;
+                base_de_donnees[index_utilisateur_courant].tick_emprunt_coupante = xTaskGetTickCount();
+            } else {
+                // 如果没拿走，恢复关锁状态
+                taskENTER_CRITICAL();
+                etat_verrous &= ~(1 << slot_choisi);
+                taskEXIT_CRITICAL();
             }
-            xSemaphoreGive(pxLED_MUTEX);
         }
 
-        // 10. 释放会话锁（简单实现，后续可改为引用计数）
+        if (xSemaphoreTake(pxLED_MUTEX, portMAX_DELAY) == pdPASS) {
+            for (int i = 0; i < 16; i++) { LED[i][0] = 0; LED[i][1] = 0; LED[i][2] = 0; }
+            xSemaphoreGive(pxLED_MUTEX);
+        }
         session_en_cours = 0;
     }
 }
@@ -332,6 +323,33 @@ static void Task_Retour_Denude(void *pvParameters) {
     }
 }
 
+// 定义 4小时30分钟对应的 Tick 数 (4.5 * 3600 * 1000 毫秒)
+#define TIMEOUT_4H30 16200000 
+
+static void Task_Check_Stock(void *pvParameters) {
+    while(1) {
+        uint32_t current_tick = xTaskGetTickCount();
+        
+        for(int i = 0; i < nombre_etudiant; i++) {
+            // 只有当前权限允许借出的(1)，才检查是否超时 [cite: 159]
+            if(base_de_donnees[i].droits == 1) {
+                // 检查剪线钳是否超时
+                if(base_de_donnees[i].id_pince_coupante != 0 && 
+                  (current_tick - base_de_donnees[i].tick_emprunt_coupante) > TIMEOUT_4H30) {
+                    base_de_donnees[i].droits = 2; // 降级为等待归还 [cite: 100, 159]
+                }
+                // 检查剥线钳是否超时
+                else if(base_de_donnees[i].id_pince_denude != 0 && 
+                  (current_tick - base_de_donnees[i].tick_emprunt_denude) > TIMEOUT_4H30) {
+                    base_de_donnees[i].droits = 2; // 降级为等待归还 [cite: 100, 159]
+                }
+            }
+        }
+        // 题设要求每隔一秒钟触发一次验证 [cite: 159]
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 // ========== 系统初始化函数 ==========
 void vInit_myTasks( UBaseType_t uxPriority )
 {
@@ -382,6 +400,13 @@ void vInit_myTasks( UBaseType_t uxPriority )
                 NULL,
                 uxPriority + 2,
                 &xTask_Retour_Denude_Handle);
+				
+	xTaskCreate(Task_Check_Stock,
+                "StockChk",
+                128,
+                NULL,
+                uxPriority, // 基础优先级即可
+                NULL);
 
     // 5. 硬件初始化
     InitSystem();

@@ -47,49 +47,35 @@ void Init_Database_Test(void){
 }
 
 void BuildTrameNeo(void *pvParameters) {
-	(void)pvParameters;
+    (void)pvParameters;
     int i, bit;
     int idx;
     
     while(1)
     {
-        // 1. 尝试获取 Mutex
+        // 阻塞任务，等待来自 TIM3_IRQHandler 的通知
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
         if(xSemaphoreTake(pxLED_MUTEX, portMAX_DELAY) == pdPASS)
         {
             idx = 0;
-            // 2. 遍历 32 个灯
             for(i = 0; i < 32; i++) {
-                // 注意 WS2812B 的顺序是 GRB (绿、红、蓝)
                 uint32_t green = LED[i][1];
                 uint32_t red   = LED[i][0];
                 uint32_t blue  = LED[i][2];
 
-                // 拆解绿色 (G) - 8个bit，从最高位开始
-                for(bit = 7; bit >= 0; bit--) {
-                    TRAME_NEO[idx++] = (green & (1 << bit)) ? 70 : 30;
-                }
-                // 拆解红色 (R)
-                for(bit = 7; bit >= 0; bit--) {
-                    TRAME_NEO[idx++] = (red & (1 << bit)) ? 70 : 30;
-                }
-                // 拆解蓝色 (B)
-                for(bit = 7; bit >= 0; bit--) {
-                    TRAME_NEO[idx++] = (blue & (1 << bit)) ? 70 : 30;
-                }
+                for(bit = 7; bit >= 0; bit--) TRAME_NEO[idx++] = (green & (1 << bit)) ? 70 : 30;
+                for(bit = 7; bit >= 0; bit--) TRAME_NEO[idx++] = (red & (1 << bit)) ? 70 : 30;
+                for(bit = 7; bit >= 0; bit--) TRAME_NEO[idx++] = (blue & (1 << bit)) ? 70 : 30;
             }
-            // 3. 加上最后的 Reset 信号 (0% 占空比)
             TRAME_NEO[idx] = 0; 
             
-            // 4. 翻译完毕，释放 Mutex
             xSemaphoreGive(pxLED_MUTEX);
             
-            // 5. 让定时器开火！
             index_pwm = 0; 
-            TIM2->DIER |= TIM_DIER_UIE; // 开启 TIM2 更新中断
+            TIM2->DIER |= TIM_DIER_UIE; 
         }
-        
-        // 6. 睡 100ms 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        // 删除原来的 vTaskDelay(pdMS_TO_TICKS(100)); 
     }
 }
 
