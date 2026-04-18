@@ -26,3 +26,4 @@ void Update_74HCT573(uint32_t data);
 void BuildTrameNeo(void *pvParameters);
 uint32_t Read_74HC251_Inputs(void);
 void gestion_lecture_TAG_OSe(void);
+void Set_LedIHM(uint8_t r, uint8_t g, uint8_t b);

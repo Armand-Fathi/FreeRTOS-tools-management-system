@@ -39,12 +39,16 @@ volatile int session_en_cours = 0;
 extern SemaphoreHandle_t pxLED_MUTEX;
 
 // ========== 刷卡任务（保持不变，只修复句柄名） ==========
+// ========== 刷卡任务 ==========
 void Task_iButton(void *pvParameters) {
     uint64_t current_badge_id;
     int index_trouve;
     
     while (1) {
         if (session_en_cours == 0) {
+            // 没人操作时，熄灭面板提示灯 (假设你在sensors.c实现了这个控制函数)
+            // Set_LedIHM(0, 0, 0); 
+            
             gestion_lecture_TAG_OSe();
             
             current_badge_id = 0;
@@ -64,20 +68,23 @@ void Task_iButton(void *pvParameters) {
                 if (index_trouve >= 0) {
                     session_en_cours = 1;
                     index_utilisateur_courant = index_trouve;
-                    
                     uint8_t droit = base_de_donnees[index_trouve].droits;
                     
                     if (droit == 1) {
-                        if (xTask_Emprunt_Coupante_Handle != NULL)
-                            xTaskNotifyGive(xTask_Emprunt_Coupante_Handle);
-                        if (xTask_Emprunt_Denude_Handle != NULL)
-                            xTaskNotifyGive(xTask_Emprunt_Denude_Handle);
+                        // 权限1：可借。面板亮绿灯
+                        // Set_LedIHM(0, 1, 0); 
+                        if (xTask_Emprunt_Coupante_Handle != NULL) xTaskNotifyGive(xTask_Emprunt_Coupante_Handle);
+                        if (xTask_Emprunt_Denude_Handle != NULL) xTaskNotifyGive(xTask_Emprunt_Denude_Handle);
                     } else if (droit == 2) {
-                        if (xTask_Retour_Coupante_Handle != NULL)
-                            xTaskNotifyGive(xTask_Retour_Coupante_Handle);
-                        if (xTask_Retour_Denude_Handle != NULL)
-                            xTaskNotifyGive(xTask_Retour_Denude_Handle);
+                        // 权限2：只能还。面板亮橙/黄灯
+                        // Set_LedIHM(1, 1, 0); 
+                        if (xTask_Retour_Coupante_Handle != NULL) xTaskNotifyGive(xTask_Retour_Coupante_Handle);
+                        if (xTask_Retour_Denude_Handle != NULL) xTaskNotifyGive(xTask_Retour_Denude_Handle);
                     }
+                } else {
+                    // 卡号未识别，亮红灯
+                    // Set_LedIHM(1, 0, 0); 
+                    vTaskDelay(pdMS_TO_TICKS(1000)); 
                 }
             }
         }
@@ -85,6 +92,7 @@ void Task_iButton(void *pvParameters) {
     }
 }
 
+// ========== 借剪线钳任务 ==========
 // ========== 借剪线钳任务 ==========
 static void Task_Emprunt_Coupante(void *pvParameters) {
     uint32_t etat_capteurs;
@@ -103,12 +111,13 @@ static void Task_Emprunt_Coupante(void *pvParameters) {
             }
         }
 
+        // 按要求：有工具亮绿，空槽位亮红 
         if (xSemaphoreTake(pxLED_MUTEX, portMAX_DELAY) == pdPASS) {
             for (int i = 0; i < 16; i++) {
                 if (tool_present_mask & (1 << i)) {
-                    LED[i][0] = 0; LED[i][1] = 255; LED[i][2] = 0;
+                    LED[i][0] = 0; LED[i][1] = 255; LED[i][2] = 0; // 绿灯：可借
                 } else {
-                    LED[i][0] = 0; LED[i][1] = 0; LED[i][2] = 0;
+                    LED[i][0] = 255; LED[i][1] = 0; LED[i][2] = 0; // 红灯：被借空了
                 }
             }
             xSemaphoreGive(pxLED_MUTEX);
@@ -159,9 +168,8 @@ static void Task_Emprunt_Coupante(void *pvParameters) {
                 base_de_donnees[index_utilisateur_courant].id_pince_coupante = slot_choisi + 1;
                 base_de_donnees[index_utilisateur_courant].tick_emprunt_coupante = xTaskGetTickCount();
             } else {
-                // 如果没拿走，恢复关锁状态
                 taskENTER_CRITICAL();
-                etat_verrous &= ~(1 << slot_choisi);
+                etat_verrous &= ~(1 << slot_choisi); // 没拿走就重新锁上
                 taskEXIT_CRITICAL();
             }
         }
@@ -231,11 +239,11 @@ static void Task_Emprunt_Denude(void *pvParameters) {
 }
 
 // ========== 还剪线钳任务 ==========
+// ========== 还剪线钳任务 ==========
 static void Task_Retour_Coupante(void *pvParameters) {
     uint8_t id_pince;
-    int slot;
+    int slot_cible;
     uint32_t etat_capteurs;
-    uint32_t notification_val;
 
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -245,32 +253,56 @@ static void Task_Retour_Coupante(void *pvParameters) {
             session_en_cours = 0;
             continue;
         }
-        slot = id_pince - 1;
+        slot_cible = id_pince - 1; // 当初借走的槽位
 
-        // 点亮对应槽位 LED（橙色：R+G）
+        etat_capteurs = Read_74HC251_Inputs();
+
+        // 点亮整排 LED：空槽位（1）显示橙色，有工具（0）显示红色 
         if (xSemaphoreTake(pxLED_MUTEX, portMAX_DELAY) == pdPASS) {
-            LED[slot][0] = 255;   // R
-            LED[slot][1] = 100;   // G
-            LED[slot][2] = 0;     // B
+            for(int i=0; i<16; i++) {
+                if (etat_capteurs & (1 << i)) {
+                    LED[i][0] = 255; LED[i][1] = 100; LED[i][2] = 0; // 橙：空位可还 
+                } else {
+                    LED[i][0] = 255; LED[i][1] = 0; LED[i][2] = 0;   // 红：已被占 
+                }
+            }
             xSemaphoreGive(pxLED_MUTEX);
         }
 
-        if (xTaskNotifyWait(0, 0, &notification_val, pdMS_TO_TICKS(10000)) == pdPASS) {
-            etat_capteurs = Read_74HC251_Inputs();
-            // 检查工具是否已被拔出（空闲条件）
-            if (!(etat_capteurs & (1 << slot))) {
-                taskENTER_CRITICAL();
-                etat_verrous &= ~(1 << slot);   // 关锁
-                taskEXIT_CRITICAL();
+        int time_elapsed_ms = 0;
+        int retour_en_cours = 0;
 
+        while (time_elapsed_ms < 10000) {
+            // 当用户按下归还键，解锁他借走的那个槽位 [cite: 153]
+            if (!retour_en_cours && BP_RETOUR_COUPE_PRESSED()) {
+                retour_en_cours = 1;
+                taskENTER_CRITICAL();
+                etat_verrous |= (1 << slot_cible); // 开锁让他塞进去
+                taskEXIT_CRITICAL();
+            }
+
+            if (BP_FIN_PRESSED()) break; // 按下BP_fin提前结束 
+
+            vTaskDelay(pdMS_TO_TICKS(50));
+            time_elapsed_ms += 50;
+        }
+
+        // 检查是否真的归还成功（微动开关被压下变0） [cite: 87, 154]
+        if (retour_en_cours) {
+            etat_capteurs = Read_74HC251_Inputs();
+            if (!(etat_capteurs & (1 << slot_cible))) { // 0表示工具插回去了 [cite: 87]
                 base_de_donnees[index_utilisateur_courant].id_pince_coupante = 0;
                 base_de_donnees[index_utilisateur_courant].tick_emprunt_coupante = 0;
             }
+            // 无论如何都要把锁关上
+            taskENTER_CRITICAL();
+            etat_verrous &= ~(1 << slot_cible);
+            taskEXIT_CRITICAL();
         }
 
-        // 清理 LED
+        // 清理 LED [cite: 147, 153]
         if (xSemaphoreTake(pxLED_MUTEX, portMAX_DELAY) == pdPASS) {
-            LED[slot][0] = 0; LED[slot][1] = 0; LED[slot][2] = 0;
+            for(int i=0; i<16; i++) { LED[i][0] = 0; LED[i][1] = 0; LED[i][2] = 0; }
             xSemaphoreGive(pxLED_MUTEX);
         }
 

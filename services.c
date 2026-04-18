@@ -148,3 +148,9 @@ void gestion_lecture_TAG_OSe(void)
 	identifiant[7]=ONEWIRE_READ_OCTET_OS();
 }
 
+void Set_LedIHM(uint8_t r, uint8_t g, uint8_t b) {
+    if(r) GPIOB->BSRR = (1 << 5); else GPIOB->BSRR = (1 << (5 + 16));
+    if(g) GPIOB->BSRR = (1 << 6); else GPIOB->BSRR = (1 << (6 + 16));
+    if(b) GPIOB->BSRR = (1 << 7); else GPIOB->BSRR = (1 << (7 + 16));
+}
+
